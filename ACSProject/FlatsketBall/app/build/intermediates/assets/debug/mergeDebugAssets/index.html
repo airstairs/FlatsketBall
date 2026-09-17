@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Glow Basketball Arcade</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050508;
+            font-family: 'Courier New', Courier, monospace;
+            touch-action: none;
+            user-select: none;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            width: 100%;
+            display: flex;
+            justify-content: space-around;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .score-box {
+            text-align: center;
+            font-size: 26px;
+            font-weight: 900;
+            text-shadow: 0 0 12px currentColor;
+        }
+        #makes-box { color: #00ffcc; }
+        #misses-box { color: #ff0055; }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+    <script src="three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="makes-box" class="score-box">MAKES: <span id="makes">0</span></div>
+        <div id="misses-box" class="score-box">MISSES: <span id="misses">0</span></div>
+    </div>
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- Setup Scene, Camera, Renderer ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 3.5, 9);
+        camera.lookAt(0, 2, -6);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        container.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        scene.add(ambientLight);
+
+        // Grid Court Floor
+        const gridHelper = new THREE.GridHelper(50, 50, 0xff0055, 0x002233);
+        gridHelper.position.y = -2;
+        scene.add(gridHelper);
+
+        // Game State
+        let makes = 0;
+        let misses = 0;
+        const makesEl = document.getElementById('makes');
+        const missesEl = document.getElementById('misses');
+
+        const ballRadius = 0.45;
+        const hoopRadius = 0.85;
+
+        // Positioned inside camera frustum at rest (bottom of view)
+        const initialBallPos = new THREE.Vector3(0, -0.2, 3.5);
+
+        let isBallInAir = false;
+        let ballVel = new THREE.Vector3();
+        const gravity = -16;
+        let hasScoredThisThrow = false;
+
+        // --- Create Hoop Structure ---
+        const hoopGroup = new THREE.Group();
+
+        // Rim
+        const rimGeo = new THREE.TorusGeometry(hoopRadius, 0.08, 16, 32);
+        const rimMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc });
+        const rim = new THREE.Mesh(rimGeo, rimMat);
+        rim.rotation.x = Math.PI / 2;
+        hoopGroup.add(rim);
+
+        // Backboard
+        const boardWidth = 3.2, boardHeight = 2.2, boardDepth = 0.15;
+        const boardGeo = new THREE.BoxGeometry(boardWidth, boardHeight, boardDepth);
+        const boardMat = new THREE.MeshBasicMaterial({ color: 0xff00ff, wireframe: true });
+        const board = new THREE.Mesh(boardGeo, boardMat);
+        board.position.set(0, 1.1, -0.9);
+        hoopGroup.add(board);
+
+        hoopGroup.position.set(0, 2, -5.5);
+        scene.add(hoopGroup);
+
+        // --- Create Basketball ---
+        const ballGeo = new THREE.SphereGeometry(ballRadius, 24, 16);
+        const ballMat = new THREE.MeshBasicMaterial({ color: 0xff6600, wireframe: true });
+        const ball = new THREE.Mesh(ballGeo, ballMat);
+        scene.add(ball);
+
+        function resetBall() {
+            ball.position.copy(initialBallPos);
+            ballVel.set(0, 0, 0);
+            isBallInAir = false;
+            hasScoredThisThrow = false;
+        }
+        resetBall();
+
+        // --- Moving Hoop Movement ---
+        let hoopTime = 0;
+        function updateHoop(dt) {
+            hoopTime += dt * 1.6;
+            hoopGroup.position.x = Math.sin(hoopTime) * 3.0;
+        }
+
+        // --- Calibrated Swipe Controls ---
+        let touchStartPos = { x: 0, y: 0, time: 0 };
+
+        function executeLaunch(dx, dy, dt) {
+            if (dy >= -10) return; // Must swipe upwards
+
+            const timeSec = Math.max(dt, 0.05);
+            const speedY = Math.abs(dy) / timeSec;
+            const speedX = dx / timeSec;
+
+            // Recalibrated trajectory vectors from Z=3.5 to hoop at Z=-5.5
+            ballVel.x = speedX * 0.0035;
+            ballVel.y = Math.min(Math.max(speedY * 0.008, 6.0), 12.0);
+            ballVel.z = -Math.min(Math.max(speedY * 0.012, 8.0), 15.0);
+
+            isBallInAir = true;
+        }
+
+        window.addEventListener('touchstart', (e) => {
+            if (isBallInAir) return;
+            const touch = e.touches[0];
+            touchStartPos = { x: touch.clientX, y: touch.clientY, time: performance.now() };
+        }, { passive: true });
+
+        window.addEventListener('touchend', (e) => {
+            if (isBallInAir) return;
+            const touch = e.changedTouches[0];
+            executeLaunch(
+                touch.clientX - touchStartPos.x,
+                touch.clientY - touchStartPos.y,
+                (performance.now() - touchStartPos.time) / 1000
+            );
+        }, { passive: true });
+
+        let isMouseDown = false;
+        window.addEventListener('mousedown', (e) => {
+            if (isBallInAir) return;
+            isMouseDown = true;
+            touchStartPos = { x: e.clientX, y: e.clientY, time: performance.now() };
+        });
+        window.addEventListener('mouseup', (e) => {
+            if (!isMouseDown || isBallInAir) return;
+            isMouseDown = false;
+            executeLaunch(
+                e.clientX - touchStartPos.x,
+                e.clientY - touchStartPos.y,
+                (performance.now() - touchStartPos.time) / 1000
+            );
+        });
+
+        // --- Physics & Collision Engine ---
+        function checkCollisions() {
+            const hoopPos = hoopGroup.position;
+
+            // 1. Backboard Collision
+            const bbMinX = hoopPos.x - boardWidth / 2 - ballRadius;
+            const bbMaxX = hoopPos.x + boardWidth / 2 + ballRadius;
+            const bbMinY = hoopPos.y + 1.1 - boardHeight / 2 - ballRadius;
+            const bbMaxY = hoopPos.y + 1.1 + boardHeight / 2 + ballRadius;
+            const bbZ = hoopPos.z - 0.9;
+
+            if (ball.position.x > bbMinX && ball.position.x < bbMaxX &&
+                ball.position.y > bbMinY && ball.position.y < bbMaxY) {
+                
+                if (Math.abs(ball.position.z - (bbZ + ballRadius)) < 0.25 && ballVel.z < 0) {
+                    ballVel.z = -ballVel.z * 0.55;
+                    ballVel.x += (Math.random() - 0.5) * 1.5;
+                }
+            }
+
+            // 2. Rim Ring Collision & Scoring
+            const dx = ball.position.x - hoopPos.x;
+            const dz = ball.position.z - hoopPos.z;
+            const distFromCenter = Math.hypot(dx, dz);
+            const distFromRimTube = Math.abs(distFromCenter - hoopRadius);
+
+            if (distFromRimTube < (ballRadius + 0.08) && Math.abs(ball.position.y - hoopPos.y) < 0.35) {
+                const bounceAngle = Math.atan2(dz, dx);
+                ballVel.x = Math.cos(bounceAngle) * 4.5;
+                ballVel.z = Math.sin(bounceAngle) * 4.5;
+                ballVel.y = Math.abs(ballVel.y) * 0.45;
+            }
+
+            if (!hasScoredThisThrow && 
+                distFromCenter < hoopRadius * 0.65 && 
+                Math.abs(ball.position.y - hoopPos.y) < 0.3 && 
+                ballVel.y < 0) {
+                
+                makes++;
+                makesEl.textContent = makes;
+                hasScoredThisThrow = true;
+
+                rimMat.color.setHex(0xffffff);
+                setTimeout(() => rimMat.color.setHex(0x00ffcc), 250);
+            }
+        }
+
+        // --- Main Animation Loop ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = Math.min(clock.getDelta(), 0.1);
+
+            updateHoop(dt);
+
+            if (isBallInAir) {
+                ballVel.y += gravity * dt;
+                ball.position.addScaledVector(ballVel, dt);
+                ball.rotation.x -= 4 * dt;
+
+                checkCollisions();
+
+                if (ball.position.y < -3 || ball.position.z < -14 || ball.position.z > 8) {
+                    if (!hasScoredThisThrow) {
+                        misses++;
+                        missesEl.textContent = misses;
+                    }
+                    resetBall();
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
